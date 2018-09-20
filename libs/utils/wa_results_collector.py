@@ -376,7 +376,10 @@ class WaResultsCollector(object):
         # now, though - that refactoring would probably belong alongside a
         # refactoring to use WA's own API for reading output directories.
         df['_job_dir'] = df['id'].replace(job_dir_map)
-        df.loc[:, 'kernel_sha1'] = self._wa_get_kernel_sha1(wa_dir)
+        try:
+            df.loc[:, 'kernel_sha1'] = self._wa_get_kernel_sha1(wa_dir)
+        except:
+            df.loc[:, 'kernel_sha1'] = os.path.basename(wa_dir)
 
         return df
 
@@ -516,7 +519,7 @@ class WaResultsCollector(object):
         # TODO: once WA's reporting of this data has been cleaned up a bit I
         # think we can simplify this.
         for artifact_name, path in artifacts.iteritems():
-            if os.stat(path).st_size == 0:
+            if not os.path.isfile(path) or not os.access(path, os.R_OK) or os.stat(path).st_size == 0:
                 self._log.info(" no data for %s",  path)
                 continue
 
@@ -1047,7 +1050,7 @@ class WaResultsCollector(object):
 
         return pd.DataFrame(comparisons)
 
-    def plot_comparisons(self, base_id=None, by='kernel'):
+    def plot_comparisons(self, base_id=None, by='kernel', select_metrics=[]):
         """
         Visualise metrics that changed between a baseline and variants
 
@@ -1081,7 +1084,11 @@ class WaResultsCollector(object):
             # this is a terrible hack which is necessary because when we set the
             # opacity of the first bar, it sets the opacity of the legend. So we
             # introduce a dummy bar with a value of 0 and an opacity of 1.
-            all_metrics = test_comparisons['metric'].unique()
+            if not select_metrics:
+                all_metrics = test_comparisons['metric'].unique()
+            else:
+                all_metrics = [metric for metric in select_metrics
+                               if metric in test_comparisons['metric'].unique()]
             pos = np.arange(-1, len(all_metrics))
 
             # At each point on the discrete y-axis we'll have one bar for each
