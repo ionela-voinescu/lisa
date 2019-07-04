@@ -226,7 +226,9 @@ class EnergyModelNode(_CpuTree):
         """Return the idle state with index ``idx``"""
         # NB self.idle_states must be ordered for this to work. __init__
         # enforces that it is an OrderedDict
-        if self.idle_states and idx < len(self.idle_states):
+        if not self.idle_states:
+            return None
+        if idx < len(self.idle_states):
             return list(self.idle_states.keys())[idx]
 
         raise KeyError('No idle state with index {}'.format(idx))
@@ -538,7 +540,8 @@ class EnergyModel(Serializable, Loggable):
         """
         states = self._guess_idle_states(cpus_active)
         return [s or list(c.idle_states.keys())[0]
-                for s, c in zip(states, self.cpu_nodes)]
+                for s, c in zip(states, self.cpu_nodes)
+                if s or c.idle_states]
 
     def _guess_freqs(self, cpu_utils, capacity_margin_pct):
         overutilized = False
@@ -606,7 +609,7 @@ class EnergyModel(Serializable, Loggable):
         for node in self.root.iter_nodes():
             # Some nodes might not have energy model data, they could just be
             # used to group other nodes (likely the root node, for example).
-            if not node.active_states or not node.idle_states:
+            if not node.active_states:
                 continue
 
             cpus = tuple(node.cpus)
@@ -622,8 +625,11 @@ class EnergyModel(Serializable, Loggable):
             active_time = max(cpu_active_time[c] for c in cpus)
             active_power = node.active_states[freq].power * active_time
 
-            _idle_power = max(node.idle_states[idle_states[c]] for c in cpus)
-            idle_power = _idle_power * (1 - active_time)
+            if idle_states:
+                _idle_power = max(node.idle_states[idle_states[c]] for c in cpus)
+                idle_power = _idle_power * (1 - active_time)
+            else:
+                idle_power = 0
 
             if combine:
                 ret[cpus] = active_power + idle_power
