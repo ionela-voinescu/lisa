@@ -23,6 +23,7 @@ from contextlib import contextmanager
 from functools import partial, reduce
 from itertools import groupby
 from operator import itemgetter
+from weakref import WeakKeyDictionary, WeakSet
 
 import ctypes
 import functools
@@ -44,6 +45,11 @@ try:
     from contextlib import ExitStack
 except AttributeError:
     from contextlib2 import ExitStack
+
+try:
+    from shlex import quote
+except ImportError:
+    from pipes import quote
 
 from past.builtins import basestring
 
@@ -136,9 +142,6 @@ def get_cpu_name(implementer, part, variant):
 
 
 def preexec_function():
-    # Ignore the SIGINT signal by setting the handler to the standard
-    # signal handler SIG_IGN.
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
     # Change process group in case we have to kill the subprocess and all of
     # its children later.
     # TODO: this is Unix-specific; would be good to find an OS-agnostic way
@@ -167,13 +170,6 @@ def check_output(command, timeout=None, ignore=None, inputtext=None,
     if 'stdout' in kwargs:
         raise ValueError('stdout argument not allowed, it will be overridden.')
 
-    def callback(pid):
-        try:
-            check_output_logger.debug('{} timed out; sending SIGKILL'.format(pid))
-            os.killpg(pid, signal.SIGKILL)
-        except OSError:
-            pass  # process may have already terminated.
-
     with check_output_lock:
         stderr = subprocess.STDOUT if combined_output else subprocess.PIPE
         process = subprocess.Popen(command,
@@ -183,27 +179,25 @@ def check_output(command, timeout=None, ignore=None, inputtext=None,
                                    preexec_fn=preexec_function,
                                    **kwargs)
 
-    if timeout:
-        timer = threading.Timer(timeout, callback, [process.pid, ])
-        timer.start()
-
     try:
-        output, error = process.communicate(inputtext)
-        if sys.version_info[0] == 3:
-            # Currently errors=replace is needed as 0x8c throws an error
-            output = output.decode(sys.stdout.encoding or 'utf-8', "replace")
-            if error:
-                error = error.decode(sys.stderr.encoding or 'utf-8', "replace")
-    finally:
-        if timeout:
-            timer.cancel()
+        output, error = process.communicate(inputtext, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        timeout_expired = e
+    else:
+        timeout_expired = None
+
+    if sys.version_info[0] == 3:
+        # Currently errors=replace is needed as 0x8c throws an error
+        output = output.decode(sys.stdout.encoding or 'utf-8', "replace")
+        if error:
+            error = error.decode(sys.stderr.encoding or 'utf-8', "replace")
+
+    if timeout_expired:
+        raise TimeoutError(command, output='\n'.join([output or '', error or '']))
 
     retcode = process.poll()
-    if retcode:
-        if retcode == -9:  # killed, assume due to timeout callback
-            raise TimeoutError(command, output='\n'.join([output or '', error or '']))
-        elif ignore != 'all' and retcode not in ignore:
-            raise subprocess.CalledProcessError(retcode, command, output='\n'.join([output or '', error or '']))
+    if retcode and ignore != 'all' and retcode not in ignore:
+        raise subprocess.CalledProcessError(retcode, command, output='\n'.join([output or '', error or '']))
     return output, error
 
 
@@ -244,6 +238,32 @@ def walk_modules(path):
             mods.append(submod)
     return mods
 
+def redirect_streams(stdout, stderr, command):
+    """
+    Update a command to redirect a given stream to /dev/null if it's
+    ``subprocess.DEVNULL``.
+
+    :return: A tuple (stdout, stderr, command) with stream set to ``subprocess.PIPE``
+        if the `stream` parameter was set to ``subprocess.DEVNULL``.
+    """
+    def redirect(stream, redirection):
+        if stream == subprocess.DEVNULL:
+            suffix = '{}/dev/null'.format(redirection)
+        elif stream == subprocess.STDOUT:
+            suffix = '{}&1'.format(redirection)
+            # Indicate that there is nothing to monitor for stderr anymore
+            # since it's merged into stdout
+            stream = subprocess.DEVNULL
+        else:
+            suffix = ''
+
+        return (stream, suffix)
+
+    stdout, suffix1 = redirect(stdout, '>')
+    stderr, suffix2 = redirect(stderr, '2>')
+
+    command = 'sh -c {} {} {}'.format(quote(command), suffix1, suffix2)
+    return (stdout, stderr, command)
 
 def ensure_directory_exists(dirpath):
     """A filter for directory paths to ensure they exist."""
@@ -718,3 +738,120 @@ def batch_contextmanager(f, kwargs_list):
         for kwargs in kwargs_list:
             stack.enter_context(f(**kwargs))
         yield
+
+class tls_property:
+    """
+    Use it like `property` decorator, but the result will be memoized per
+    thread. When the owning thread dies, the values for that thread will be
+    destroyed.
+
+    In order to get the values, it's necessary to call the object
+    given by the property. This is necessary in order to be able to add methods
+    to that object, like :meth:`_BoundTLSProperty.get_all_values`.
+
+    Values can be set and deleted as well, which will be a thread-local set.
+    """
+
+    @property
+    def name(self):
+        return self.factory.__name__
+
+    def __init__(self, factory):
+        self.factory = factory
+        # Lock accesses to shared WeakKeyDictionary and WeakSet
+        self.lock = threading.Lock()
+
+    def __get__(self, instance, owner=None):
+        return _BoundTLSProperty(self, instance, owner)
+
+    def _get_value(self, instance, owner):
+        tls, values = self._get_tls(instance)
+        try:
+            return tls.value
+        except AttributeError:
+            # Bind the method to `instance`
+            f = self.factory.__get__(instance, owner)
+            obj = f()
+            tls.value = obj
+            # Since that's a WeakSet, values will be removed automatically once
+            # the threading.local variable that holds them is destroyed
+            with self.lock:
+                values.add(obj)
+            return obj
+
+    def _get_all_values(self, instance, owner):
+        with self.lock:
+            # Grab a reference to all the objects at the time of the call by
+            # using a regular set
+            tls, values = self._get_tls(instance=instance)
+            return set(values)
+
+    def __set__(self, instance, value):
+        tls, values = self._get_tls(instance)
+        tls.value = value
+        with self.lock:
+            values.add(value)
+
+    def __delete__(self, instance):
+        tls, values = self._get_tls(instance)
+        with self.lock:
+            values.discard(tls.value)
+        del tls.value
+
+    def _get_tls(self, instance):
+        dct = instance.__dict__
+        name = self.name
+        try:
+            # Using instance.__dict__[self.name] is safe as
+            # getattr(instance, name) will return the property instead, as
+            # the property is a descriptor
+            tls = dct[name]
+        except KeyError:
+            with self.lock:
+                # Double check after taking the lock to avoid a race
+                if name not in dct:
+                    tls = (threading.local(), WeakSet())
+                    dct[name] = tls
+
+        return tls
+
+    @property
+    def basic_property(self):
+        """
+        Return a basic property that can be used to access the TLS value
+        without having to call it first.
+
+        The drawback is that it's not possible to do anything over than
+        getting/setting/deleting.
+        """
+        def getter(instance, owner=None):
+            prop = self.__get__(instance, owner)
+            return prop()
+
+        return property(getter, self.__set__, self.__delete__)
+
+class _BoundTLSProperty:
+    """
+    Simple proxy object to allow either calling it to get the TLS value, or get
+    some other informations by calling methods.
+    """
+    def __init__(self, tls_property, instance, owner):
+        self.tls_property = tls_property
+        self.instance = instance
+        self.owner = owner
+
+    def __call__(self):
+        return self.tls_property._get_value(
+            instance=self.instance,
+            owner=self.owner,
+        )
+
+    def get_all_values(self):
+        """
+        Returns all the thread-local values currently in use in the process for
+        that property for that instance.
+        """
+        return self.tls_property._get_all_values(
+            instance=self.instance,
+            owner=self.owner,
+        )
