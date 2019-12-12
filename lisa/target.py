@@ -608,6 +608,7 @@ class Target(Loggable, HideExekallID, ExekallTaggable, Configurable):
             conn_settings['username'] = resolved_username
             conn_settings['port'] = port or self.SSH_PORT_DEFAULT
             conn_settings['host'] = host
+            conn_settings['strict_host_check'] = False
 
             # Configure password or SSH keyfile
             if keyfile:
