@@ -370,6 +370,23 @@ class SshConnection(SshConnectionBase):
         self.client = self._make_client()
         atexit.register(self.close)
 
+        # Use a marker in the output so that we will be able to differentiate
+        # target connection issues with "password needed".
+        # Also, sudo might not be installed at all on the target (but
+        # everything will work as long as we login as root). If sudo is still
+        # needed, it will explode when someone tries to use it. After all, the
+        # user might not be interested in being root at all.
+        self._sudo_needs_password = (
+            'NEED_PASSOWRD' in
+            self.execute(
+                # sudo -n is broken on some versions on MacOSX, revisit that if
+                # someone ever cares
+                'sudo -n true || echo NEED_PASSWORD',
+                as_root=False,
+                check_exit_code=False,
+            )
+        )
+
     def _make_client(self):
         if self.strict_host_check:
             policy = RejectPolicy
@@ -404,19 +421,44 @@ class SshConnection(SshConnectionBase):
 
     @classmethod
     def _push_file(cls, sftp, src, dst):
-        sftp.put(src, dst)
+        try:
+            sftp.put(src, dst)
+        # Maybe the dst was a folder
+        except OSError:
+            # This might fail if the folder already exists
+            with contextlib.suppress(IOError):
+                sftp.mkdir(dst)
+
+            new_dst = os.path.join(
+                dst,
+                os.path.basename(src),
+            )
+
+            return cls._push_file(sftp, src, new_dst)
+
 
     @classmethod
     def _push_folder(cls, sftp, src, dst):
+        # Behave like the "mv" command or adb push: a new folder is created
+        # inside the destination folder, rather than merging the trees.
+        dst = os.path.join(
+            dst,
+            os.path.basename(src),
+        )
+        return cls._push_folder_internal(sftp, src, dst)
+
+    @classmethod
+    def _push_folder_internal(cls, sftp, src, dst):
         # This might fail if the folder already exists
         with contextlib.suppress(IOError):
             sftp.mkdir(dst)
+
         for entry in os.scandir(src):
             name = entry.name
             src_path = os.path.join(src, name)
             dst_path = os.path.join(dst, name)
             if entry.is_dir():
-                push = cls._push_folder
+                push = cls._push_folder_internal
             else:
                 push = cls._push_file
 
@@ -429,8 +471,16 @@ class SshConnection(SshConnectionBase):
 
     @classmethod
     def _pull_file(cls, sftp, src, dst):
+        # Pulling a file into a folder will use the source basename
+        if os.path.isdir(dst):
+            dst = os.path.join(
+                dst,
+                os.path.basename(src),
+            )
+
         with contextlib.suppress(FileNotFoundError):
             os.remove(dst)
+
         sftp.get(src, dst)
 
     @classmethod
@@ -510,7 +560,7 @@ class SshConnection(SshConnectionBase):
                 channel.makefile_stderr(),
             )
 
-        stdin, stdout_in, stderr_in = self._execute_with_sudo(
+        stdin, stdout_in, stderr_in = self._execute_command(
             command,
             as_root=as_root,
             log=False,
@@ -621,22 +671,23 @@ class SshConnection(SshConnectionBase):
                 bg_cmd.close()
             self.client.close()
 
-    def _execute_with_sudo(self, command, as_root, log, timeout, executor):
+    def _execute_command(self, command, as_root, log, timeout, executor):
         # As we're already root, there is no need to use sudo.
         log_debug = logger.debug if log else lambda msg: None
         use_sudo = as_root and not self.connected_as_root
 
         if use_sudo:
-            if not self.password:
+            if self._sudo_needs_password and not self.password:
                 raise TargetStableError('Attempt to use sudo but no password was specified')
 
             command = self.sudo_cmd.format(quote(command))
 
             log_debug(command)
             streams = executor(command, timeout=timeout)
-            stdin = streams[0]
-            stdin.write(self.password + '\n')
-            stdin.flush()
+            if self._sudo_needs_password:
+                stdin = streams[0]
+                stdin.write(self.password + '\n')
+                stdin.flush()
         else:
             log_debug(command)
             streams = executor(command, timeout=timeout)
@@ -647,7 +698,7 @@ class SshConnection(SshConnectionBase):
         # Merge stderr into stdout since we are going without a TTY
         command = '({}) 2>&1'.format(command)
 
-        stdin, stdout, stderr = self._execute_with_sudo(
+        stdin, stdout, stderr = self._execute_command(
             command,
             as_root=as_root,
             log=log,

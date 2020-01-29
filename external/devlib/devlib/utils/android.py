@@ -333,6 +333,12 @@ class AdbConnection(ConnectionBase):
             adb_disconnect(self.device)
             del AdbConnection.active_connections[self.device]
 
+    def cancel_running_command(self):
+        # adbd multiplexes commands so that they don't interfer with each
+        # other, so there is no need to explicitly cancel a running command
+        # before the next one can be issued.
+        pass
+
     def adb_root(self, enable=True):
         cmd = 'root' if enable else 'unroot'
         output = adb_command(self.device, cmd, timeout=30)

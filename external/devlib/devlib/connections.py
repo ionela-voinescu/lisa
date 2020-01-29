@@ -21,6 +21,8 @@ import threading
 from weakref import WeakSet
 from abc import ABC, abstractmethod
 
+from devlib.utils.misc import InitCheckpoint
+
 _KILL_TIMEOUT = 3
 
 
@@ -28,7 +30,7 @@ def _kill_pgid_cmd(pgid, sig):
     return 'kill -{} -{}'.format(sig.name, pgid)
 
 
-class ConnectionBase:
+class ConnectionBase(InitCheckpoint):
     """
     Base class for all connections.
     """
@@ -64,7 +66,11 @@ class ConnectionBase:
     # Ideally, that should not be relied upon but that will improve the chances
     # of the connection being properly cleaned up when it's not in use anymore.
     def __del__(self):
-        self.close()
+        # Since __del__ will be called if an exception is raised in __init__
+        # (e.g. we cannot connect), we only run close() when we are sure
+        # __init__ has completed successfully.
+        if self.initialized:
+            self.close()
 
 
 class BackgroundCommand(ABC):

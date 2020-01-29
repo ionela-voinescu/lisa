@@ -167,18 +167,13 @@ class Target(object):
     @property
     @memoized
     def number_of_nodes(self):
-        cmd = 'cd /sys/devices/system/node && {busybox} find . -maxdepth 1'.format(busybox=quote(self.busybox))
-        try:
-            output = self.execute(cmd, as_root=self.is_rooted)
-        except TargetStableError:
-            return 1
-        else:
-            nodere = re.compile(r'^\./node\d+\s*$')
-            num_nodes = 0
-            for entry in output.splitlines():
-                if nodere.match(entry):
-                    num_nodes += 1
-            return num_nodes
+        num_nodes = 0
+        nodere = re.compile(r'^\s*node\d+\s*$')
+        output = self.execute('ls /sys/devices/system/node', as_root=self.is_rooted)
+        for entry in output.split():
+            if nodere.match(entry):
+                num_nodes += 1
+        return num_nodes
 
     @property
     @memoized
@@ -240,7 +235,6 @@ class Target(object):
                  is_container=False
                  ):
 
-        self._tls = threading.local()
         self._is_rooted = None
         self.connection_settings = connection_settings or {}
         # Set self.platform: either it's given directly (by platform argument)
@@ -293,6 +287,7 @@ class Target(object):
         self.conn = self.get_connection(timeout=timeout)
         if check_boot_completed:
             self.wait_boot_complete(timeout)
+        self.check_connection()
         self._resolve_paths()
         self.execute('mkdir -p {}'.format(quote(self.working_directory)))
         self.execute('mkdir -p {}'.format(quote(self.executables_directory)))
@@ -301,6 +296,14 @@ class Target(object):
         self._update_modules('connected')
         if self.platform.big_core and self.load_default_modules:
             self._install_module(get_module('bl'))
+
+    def check_connection(self):
+        """
+        Check that the connection works without obvious issues.
+        """
+        out = self.execute('true', as_root=False)
+        if out.strip():
+            raise TargetStableError('The shell seems to not be functional and adds content to stderr: {}'.format(out))
 
     def disconnect(self):
         connections = self._conn.get_all_values()
@@ -1514,18 +1517,15 @@ class AndroidTarget(Target):
         self._ensure_executables_directory_is_writable()
         self.remove(on_device_executable, as_root=self.needs_su)
 
-    def dump_logcat(self, filepath, filter=None, logcat_format=None, append=False,
-                    timeout=30):  # pylint: disable=redefined-builtin
+    def dump_logcat(self, filepath, filter=None, append=False, timeout=30):  # pylint: disable=redefined-builtin
         op = '>>' if append else '>'
         filtstr = ' -s {}'.format(quote(filter)) if filter else ''
-        formatstr = ' -v {}'.format(quote(logcat_format)) if logcat_format else ''
-        logcat_opts = '-d' + formatstr + filtstr
         if isinstance(self.conn, AdbConnection):
-            command = 'logcat {} {} {}'.format(logcat_opts, op, quote(filepath))
+            command = 'logcat -d{} {} {}'.format(filtstr, op, quote(filepath))
             adb_command(self.adb_name, command, timeout=timeout)
         else:
             dev_path = self.get_workpath('logcat')
-            command = 'logcat {} {} {}'.format(logcat_opts, op, quote(dev_path))
+            command = 'logcat -d{} {} {}'.format(filtstr, op, quote(dev_path))
             self.execute(command, timeout=timeout)
             self.pull(dev_path, filepath)
             self.remove(dev_path)

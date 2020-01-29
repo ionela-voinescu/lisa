@@ -127,6 +127,9 @@ class LocalConnection(ConnectionBase):
     def _close(self):
         pass
 
+    def cancel_running_command(self):
+        pass
+
     def wait_for_device(self, timeout=30):
         return
 
