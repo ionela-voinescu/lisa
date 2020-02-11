@@ -39,7 +39,7 @@ except ImportError:
 
 from devlib.exception import TargetTransientError, TargetStableError, HostError
 from devlib.utils.misc import check_output, which, ABI_MAP, redirect_streams
-from devlib.connections import ConnectionBase, AdbBackgroundCommand
+from devlib.connection import ConnectionBase, AdbBackgroundCommand
 
 
 logger = logging.getLogger('android')
