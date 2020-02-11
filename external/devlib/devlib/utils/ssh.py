@@ -53,7 +53,7 @@ from devlib.exception import (HostError, TargetStableError, TargetNotRespondingE
 from devlib.utils.misc import (which, strip_bash_colors, check_output,
                                sanitize_cmd_template, memoized, redirect_streams)
 from devlib.utils.types import boolean
-from devlib.connections import ConnectionBase, ParamikoBackgroundCommand, PopenBackgroundCommand
+from devlib.connection import ConnectionBase, ParamikoBackgroundCommand, PopenBackgroundCommand
 
 
 ssh = None
@@ -63,37 +63,6 @@ sshpass = None
 
 logger = logging.getLogger('ssh')
 gem5_logger = logging.getLogger('gem5-connection')
-
-def ssh_get_shell(host, username, password=None, keyfile=None, port=None, timeout=10, telnet=False, original_prompt=None):
-    _check_env()
-    start_time = time.time()
-    while True:
-        if telnet:
-            if keyfile:
-                raise ValueError('keyfile may not be used with a telnet connection.')
-            conn = TelnetPxssh(original_prompt=original_prompt)
-        else:  # ssh
-            conn = pxssh.pxssh(echo=False)
-
-        try:
-            if keyfile:
-                conn.login(host, username, ssh_key=keyfile, port=port, login_timeout=timeout)
-            else:
-                conn.login(host, username, password, port=port, login_timeout=timeout)
-            break
-        except EOF:
-            timeout -= time.time() - start_time
-            if timeout <= 0:
-                message = 'Could not connect to {}; is the host name correct?'
-                raise TargetTransientError(message.format(host))
-            time.sleep(5)
-
-    conn.setwinsize(500, 200)
-    conn.sendline('')
-    conn.prompt()
-    conn.setecho(False)
-    return conn
-
 
 @contextlib.contextmanager
 def _handle_paramiko_exceptions(command=None):
@@ -188,31 +157,20 @@ def _read_paramiko_streams_internal(stdout, stderr, select_timeout, callback, in
         exit_code = channel.recv_exit_status()
         return (callback_state, exit_code)
 
-def ssh_get_shell(host,
+
+def telnet_get_shell(host,
                   username,
                   password=None,
-                  keyfile=None,
                   port=None,
                   timeout=10,
-                  telnet=False,
-                  original_prompt=None,
-                  options=None):
+                  original_prompt=None):
     _check_env()
     start_time = time.time()
     while True:
-        if telnet:
-            if keyfile:
-                raise ValueError('keyfile may not be used with a telnet connection.')
-            conn = TelnetPxssh(original_prompt=original_prompt)
-        else:  # ssh
-            conn = pxssh.pxssh(options=options,
-                               echo=False)
+        conn = TelnetPxssh(original_prompt=original_prompt)
 
         try:
-            if keyfile:
-                conn.login(host, username, ssh_key=keyfile, port=port, login_timeout=timeout)
-            else:
-                conn.login(host, username, password, port=port, login_timeout=timeout)
+            conn.login(host, username, password, port=port, login_timeout=timeout)
             break
         except EOF:
             timeout -= time.time() - start_time
@@ -348,7 +306,7 @@ class SshConnection(SshConnectionBase):
                  username,
                  password=None,
                  keyfile=None,
-                 port=None,
+                 port=22,
                  timeout=None,
                  platform=None,
                  sudo_cmd="sudo -S -- sh -c {}",
@@ -771,7 +729,7 @@ class TelnetConnection(SshConnectionBase):
         logger.debug('Logging in {}@{}'.format(username, host))
         timeout = timeout if timeout is not None else self.default_timeout
 
-        self.conn = ssh_get_shell(host, username, password, None, port, timeout, True, original_prompt, self.options)
+        self.conn = telnet_get_shell(host, username, password, port, timeout, original_prompt)
         atexit.register(self.close)
 
     def push(self, source, dest, timeout=30):

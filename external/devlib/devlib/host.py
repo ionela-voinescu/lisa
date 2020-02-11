@@ -24,7 +24,7 @@ from pipes import quote
 
 from devlib.exception import TargetTransientError, TargetStableError
 from devlib.utils.misc import check_output
-from devlib.connections import ConnectionBase, PopenBackgroundCommand
+from devlib.connection import ConnectionBase, PopenBackgroundCommand
 
 
 PACKAGE_BIN_DIRECTORY = os.path.join(os.path.dirname(__file__), 'bin')
