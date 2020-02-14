@@ -137,6 +137,19 @@ class BackgroundCommand(ABC):
         File-like object connected to the background's command stderr.
         """
 
+    @property
+    @abstractmethod
+    def pid(self):
+        """
+        Process Group ID (PGID) of the background command.
+
+        Since the command is usually wrapped in shell processes for IO
+        redirections, sudo etc, the PID cannot be assumed to be the actual PID
+        of the command passed by the user. It's is guaranteed to be a PGID
+        instead, which means signals sent to it as such will target all
+        subprocesses involved in executing that command.
+        """
+
     @abstractmethod
     def close(self):
         """
@@ -178,6 +191,10 @@ class PopenBackgroundCommand(BackgroundCommand):
     def stderr(self):
         return self.popen.stderr
 
+    @property
+    def pid(self):
+        return self.popen.pid
+
     def wait(self):
         return self.popen.wait()
 
@@ -211,7 +228,7 @@ class ParamikoBackgroundCommand(BackgroundCommand):
         self.chan = chan
         self.as_root = as_root
         self.conn = conn
-        self.pid = pid
+        self._pid = pid
         self._stdin = stdin
         self._stdout = stdout
         self._stderr = stderr
@@ -226,6 +243,10 @@ class ParamikoBackgroundCommand(BackgroundCommand):
         # itself
         cmd = _kill_pgid_cmd(self.pid, sig)
         self.conn.execute(cmd, as_root=self.as_root)
+
+    @property
+    def pid(self):
+        return self._pid
 
     def wait(self):
         return self.chan.recv_exit_status()
@@ -280,7 +301,7 @@ class AdbBackgroundCommand(BackgroundCommand):
         self.conn = conn
         self.as_root = as_root
         self.adb_popen = adb_popen
-        self.pid = pid
+        self._pid = pid
 
     def send_signal(self, sig):
         self.conn.execute(
@@ -299,6 +320,10 @@ class AdbBackgroundCommand(BackgroundCommand):
     @property
     def stderr(self):
         return self.adb_popen.stderr
+
+    @property
+    def pid(self):
+        return self._pid
 
     def wait(self):
         return self.adb_popen.wait()
